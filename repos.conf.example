@@ -1,0 +1,13 @@
+# Docker Error Watcher — Container → Repo mapping
+#
+# Format: container-name-pattern=owner/repo
+# Patterns use bash glob matching (*, ?)
+#
+# Examples:
+# myapp-*=myorg/myapp
+# api-*=myorg/backend
+# redis-*=myorg/infra
+# nginx-*=myorg/infra
+
+# Add your mappings below:
+# myapp-*=myorg/myapp
