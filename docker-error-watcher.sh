@@ -24,7 +24,15 @@ MAX_ISSUES_PER_RUN="${WATCHER_MAX_ISSUES:-5}" # Anti-flood: max issues per execu
 LOG_WINDOW="${WATCHER_LOG_WINDOW:-5m}"        # How far back to check logs
 DEFAULT_REPO="${WATCHER_DEFAULT_REPO:-}"      # Fallback repo (leave empty to skip unknown containers)
 
+# Metrics + alerting (additive, all optional):
+METRICS_FILE="${WATCHER_METRICS_FILE:-$STATE_DIR/metrics.jsonl}"  # JSONL per-run rollups
+METRICS_RETENTION_DAYS="${WATCHER_METRICS_RETENTION_DAYS:-30}"    # Rotate after N days
+RATE_THRESHOLD="${WATCHER_RATE_THRESHOLD:-0}"  # If >0, create "rate spike" issue when a single (container, route) exceeds N errors in LOG_WINDOW. Default off.
+WEBHOOK_URL="${WATCHER_WEBHOOK_URL:-}"          # If set, POST summary JSON to this URL per-run
+HOSTNAME_OVERRIDE="${WATCHER_HOSTNAME:-$(hostname)}"
+
 mkdir -p "$STATE_DIR"
+mkdir -p "$(dirname "$METRICS_FILE")"
 
 # ─── Container → Repo mapping ───
 # Customize this function for your setup.
@@ -64,17 +72,27 @@ if [ -z "$CONTAINERS" ]; then
 fi
 
 issues_created=0
+run_timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+run_epoch=$(date +%s)
+
+# Per-run tally: counts keyed by "container|route". Populated while scanning
+# logs; emitted to metrics file and optional webhook at end of run.
+declare -A RATE_TALLY
+declare -A RATE_SAMPLE_MSG   # first error message per key, for context
 
 for container in $CONTAINERS; do
     REPO=$(get_repo "$container")
     [ -z "$REPO" ] && continue
 
+    # NOTE: the while-loop reads logs via a pipeline → runs in a subshell.
+    # Tally maps cannot escape a subshell, so we fan out counts via a
+    # temp file and read them back in the main shell at the end of the
+    # container loop (see below).
+    tally_tmp=$(mktemp)
     docker logs --since "$LOG_WINDOW" "$container" 2>&1 \
         | grep -iE "$ERROR_PATTERN" \
         | grep -viE "$EXCLUDE_PATTERN" \
         | while IFS= read -r line; do
-
-        [ "$issues_created" -ge "$MAX_ISSUES_PER_RUN" ] && break
 
         # Extract error message (JSON structured logs or plain text)
         error_msg=$(echo "$line" | grep -oP '"message":"[^"]*"' | head -1 | sed 's/"message":"//;s/"$//')
@@ -82,6 +100,17 @@ for container in $CONTAINERS; do
             error_msg=$(echo "$line" | sed 's/^.*\[ERROR\] //' | head -c 200)
         fi
         [ -z "$error_msg" ] && continue
+
+        # Extract route early — needed for rate tally even if we skip issue creation
+        route=$(echo "$line" | grep -oP '"route":"[^"]*"' | sed 's/"route":"//;s/"$//')
+        route="${route:-N/A}"
+
+        # Tally (written to temp file; aggregated by main shell after loop)
+        # Format: container|route|sample_message
+        # The sample is only kept for the first occurrence; awk dedupes.
+        echo "$container|$route|$error_msg" >> "$tally_tmp"
+
+        [ "$issues_created" -ge "$MAX_ISSUES_PER_RUN" ] && continue
 
         # Deduplicate by content hash
         error_hash=$(echo "$container:$error_msg" | md5sum | cut -d' ' -f1)
@@ -95,8 +124,7 @@ for container in $CONTAINERS; do
             [ "$elapsed" -lt "$COOLDOWN" ] && continue
         fi
 
-        # Extract additional context from JSON logs
-        route=$(echo "$line" | grep -oP '"route":"[^"]*"' | sed 's/"route":"//;s/"$//')
+        # Stack trace context (route already extracted above for tally)
         stack=$(echo "$line" | grep -oP '"stack":"[^"]*"' | head -c 500 | sed 's/"stack":"//;s/"$//')
 
         # Build issue title
@@ -169,7 +197,103 @@ BODY
             echo "[$(date)] Issue created in $REPO for $container: $error_msg"
         fi
     done
+
+    # ── Aggregate tally from the subshell's temp file ──
+    if [ -s "$tally_tmp" ]; then
+        while IFS='|' read -r tc troute tmsg; do
+            key="${tc}|${troute}"
+            RATE_TALLY[$key]=$(( ${RATE_TALLY[$key]:-0} + 1 ))
+            if [ -z "${RATE_SAMPLE_MSG[$key]:-}" ]; then
+                RATE_SAMPLE_MSG[$key]="$tmsg"
+            fi
+        done < "$tally_tmp"
+    fi
+    rm -f "$tally_tmp"
 done
 
-# Clean up old state files (>7 days)
-find "$STATE_DIR" -type f -mtime +7 -delete 2>/dev/null
+# ─── Emit per-run metrics ───────────────────────────────────────────
+# JSONL format: one line per (container, route) key with count + sample.
+# Downstream consumers: tail for Prometheus textfile exporter, grep for
+# on-call triage, or forward via webhook below.
+
+metrics_lines=""
+for key in "${!RATE_TALLY[@]}"; do
+    tc="${key%%|*}"
+    troute="${key##*|}"
+    count="${RATE_TALLY[$key]}"
+    sample="${RATE_SAMPLE_MSG[$key]:-}"
+    esc_sample=$(echo "$sample" | sed 's/\\/\\\\/g; s/"/\\"/g' | head -c 300)
+    line="{\"ts\":\"${run_timestamp}\",\"host\":\"${HOSTNAME_OVERRIDE}\",\"container\":\"${tc}\",\"route\":\"${troute}\",\"count\":${count},\"window\":\"${LOG_WINDOW}\",\"sample\":\"${esc_sample}\"}"
+    echo "$line" >> "$METRICS_FILE"
+    metrics_lines="${metrics_lines}${line}
+"
+
+    # Rate-spike alerting (opt-in via WATCHER_RATE_THRESHOLD>0)
+    if [ "$RATE_THRESHOLD" -gt 0 ] && [ "$count" -ge "$RATE_THRESHOLD" ]; then
+        REPO=$(get_repo "$tc")
+        [ -z "$REPO" ] && continue
+        today=$(date -u '+%Y-%m-%d')
+        spike_hash=$(echo "rate:${tc}:${troute}:${today}" | md5sum | cut -d' ' -f1)
+        spike_state="$STATE_DIR/$spike_hash"
+        [ -f "$spike_state" ] && continue
+        spike_title="[auto] rate-spike ${tc} ${troute}: ${count} errors in ${LOG_WINDOW}"
+        spike_title=$(echo "$spike_title" | head -c 120)
+        gh issue create --repo "$REPO" \
+            --title "$spike_title" \
+            --label "bug,auto-reported,rate-spike" \
+            --body "$(cat <<BODY
+## Rate spike detected
+
+| Field | Value |
+|-------|-------|
+| **Container** | \`$tc\` |
+| **Route** | \`$troute\` |
+| **Host** | \`$HOSTNAME_OVERRIDE\` |
+| **Date** | $run_timestamp |
+| **Error count** | **$count** in last \`$LOG_WINDOW\` |
+| **Threshold** | $RATE_THRESHOLD |
+
+## Sample error
+
+\`\`\`
+$sample
+\`\`\`
+
+This issue is distinct from the per-error content-dedup issues —
+it fires when the RATE of errors on a single (container, route) exceeds
+the threshold, regardless of whether each unique error already has an
+open issue. Deduped once per day per (container, route).
+
+---
+🤖 Reported by [docker-error-watcher](https://github.com/bot202102/docker-error-watcher) · rate-spike alert
+BODY
+)" 2>/dev/null && {
+            date +%s > "$spike_state"
+            echo "[$(date)] Rate spike issue created in $REPO: $tc $troute count=$count"
+        }
+    fi
+done
+
+# ─── Optional webhook ───────────────────────────────────────────────
+if [ -n "$WEBHOOK_URL" ] && [ -n "$metrics_lines" ]; then
+    events_json=$(echo "$metrics_lines" | grep -v '^$' | sed 's/$/,/' | sed '$s/,$//')
+    summary_payload="{\"ts\":\"${run_timestamp}\",\"host\":\"${HOSTNAME_OVERRIDE}\",\"window\":\"${LOG_WINDOW}\",\"events\":[${events_json}]}"
+    curl -sS -X POST -H 'Content-Type: application/json' \
+        --data "$summary_payload" \
+        "$WEBHOOK_URL" >/dev/null 2>&1 \
+        && echo "[$(date)] Webhook posted: ${#RATE_TALLY[@]} events"
+fi
+
+# ─── State file housekeeping ─────────────────────────────────────────
+# Clean up old error-dedup state files (>7 days)
+find "$STATE_DIR" -type f -mtime +7 -not -name 'metrics.jsonl*' -delete 2>/dev/null
+
+# Rotate the metrics JSONL if it's older than retention window
+if [ -f "$METRICS_FILE" ]; then
+    if find "$METRICS_FILE" -mtime "+$METRICS_RETENTION_DAYS" 2>/dev/null | grep -q .; then
+        mv "$METRICS_FILE" "${METRICS_FILE}.$(date -u '+%Y%m%d')"
+        # Compress historical rotations older than 7 days
+        find "$(dirname "$METRICS_FILE")" -name "$(basename "$METRICS_FILE").[0-9]*" \
+            -mtime +7 -not -name '*.gz' -exec gzip {} \; 2>/dev/null
+    fi
+fi
