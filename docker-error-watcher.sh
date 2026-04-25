@@ -65,6 +65,13 @@ ERROR_PATTERN='"level":"error"|ERROR|\[ERROR\]|FATAL|PANIC|Unhandled|uncaughtExc
 # False positives to exclude (pipe-separated, case-insensitive)
 EXCLUDE_PATTERN='pg_isready|redis-cli|redo done|checkpoint starting|checkpoint complete|PermissionError|ECONNREFUSED.*healthcheck'
 
+# Skip Postgres errors emitted by operator-initiated clients (psql via
+# `docker exec`, pgcli, pgAdmin, etc.) — they are not app bugs. Requires
+# Postgres `log_line_prefix` to include `%a` (application_name); see
+# README "Postgres setup" and issue #7.
+OPERATOR_APP_PATTERN="${WATCHER_OPERATOR_APPS:-\[(psql|pgcli|pgAdmin|pg_dump|pg_restore|DBeaver|DataGrip)\]}"
+EXCLUDE_PATTERN="${EXCLUDE_PATTERN}|${OPERATOR_APP_PATTERN}"
+
 # ─── Main loop ───
 CONTAINERS=$(docker ps --format '{{.Names}}' 2>/dev/null)
 if [ -z "$CONTAINERS" ]; then

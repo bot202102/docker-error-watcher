@@ -162,8 +162,22 @@ Stack trace: ...
 - Healthcheck commands (`pg_isready`, `redis-cli`)
 - PostgreSQL WAL recovery messages
 - Permission errors (usually auth-level, not crashes)
+- **Operator-initiated SQL errors** (`psql`, `pgcli`, `pgAdmin`, `pg_dump`, `pg_restore`, `DBeaver`, `DataGrip`) — see Postgres setup below
 
-Customize patterns in the script: `ERROR_PATTERN` and `EXCLUDE_PATTERN`.
+Customize patterns in the script: `ERROR_PATTERN` and `EXCLUDE_PATTERN`. Override the operator-client list via `WATCHER_OPERATOR_APPS` env var.
+
+## Postgres setup
+
+To distinguish app traffic from operator queries (e.g. `docker exec ... psql`), Postgres must log the connecting client's `application_name`. The watcher's operator-client filter relies on this.
+
+Apply on each Postgres container (no restart needed):
+
+```sql
+ALTER SYSTEM SET log_line_prefix = '%m [%p] [%a] ';
+SELECT pg_reload_conf();
+```
+
+After this, error lines look like `2026-04-25 00:32:16 UTC [1734921] [psql] ERROR: ...` and the watcher skips them. App connections without an explicit `application_name` show as `[postgres-js]` / `[node-postgres]` / `[psycopg2]` — those are NOT filtered. To make app errors easier to attribute, set `application_name=<service>` in your app's connection string.
 
 ## License
 
