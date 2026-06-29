@@ -65,7 +65,7 @@ ERROR_PATTERN='"level":"error"|ERROR|\[ERROR\]|FATAL|PANIC|Unhandled|uncaughtExc
 # False positives to exclude (pipe-separated, case-insensitive).
 # WATCHER_EXTRA_EXCLUDE_PATTERN lets operators suppress newly classified
 # benign noise without editing the script.
-BASE_EXCLUDE_PATTERN='pg_isready|redis-cli|redo done|checkpoint starting|checkpoint complete|PermissionError|ECONNREFUSED.*healthcheck|Redis broker listen interrupted; retrying'
+BASE_EXCLUDE_PATTERN='pg_isready|redis-cli|redo done|checkpoint starting|checkpoint complete|PermissionError|ECONNREFUSED.*healthcheck|^[0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}([,.][0-9]+)?[[:space:]]+INFO[[:space:]]|(^|[,{][[:space:]]*)"level"[[:space:]]*:[[:space:]]*"info"|Redis broker listen interrupted; retrying|Qdrant .*indexes ensured:.*errors=\[\]'
 if [ -n "${WATCHER_EXTRA_EXCLUDE_PATTERN:-}" ]; then
     EXCLUDE_PATTERN="${BASE_EXCLUDE_PATTERN}|${WATCHER_EXTRA_EXCLUDE_PATTERN}"
 else

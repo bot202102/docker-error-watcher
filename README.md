@@ -163,6 +163,8 @@ Stack trace: ...
 - Healthcheck commands (`pg_isready`, `redis-cli`)
 - PostgreSQL WAL recovery messages
 - Permission errors (usually auth-level, not crashes)
+- Plaintext or structured `INFO` log lines
+- Successful Qdrant index ensure messages with `errors=[]`
 
 Customize patterns in the script: `ERROR_PATTERN` and `EXCLUDE_PATTERN`.
 
@@ -176,6 +178,10 @@ WATCHER_EXTRA_EXCLUDE_PATTERN='known benign message|another harmless retry'
 Built-in false positives include resilient Redis broker retry lines such as
 `Redis broker listen interrupted; retrying`, which indicate the worker retry
 path rather than a product crash.
+
+They also include benign Qdrant startup/index ensure messages like
+`Qdrant pages indexes ensured: ... errors=[]`. A `WARNING` or `ERROR` line with
+non-empty Qdrant errors remains reportable.
 
 ## License
 

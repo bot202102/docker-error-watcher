@@ -23,7 +23,12 @@ assert_detected() {
 }
 
 assert_filtered '[enhanced_processing.queue.broker][WARNING][worker-1] Redis broker listen interrupted; retrying: TimeoutError: Timeout reading from redis:6379'
+assert_filtered '2026-06-27 22:46:41 INFO     enhanced_processing.mcp.asgi: Qdrant pages indexes ensured: created=["idx"] existed=[] errors=[]'
+assert_filtered '{"level":"info","message":"Qdrant pages indexes ensured: created=[\"idx\"] existed=[] errors=[]"}'
 assert_detected '[app][ERROR] database write failed permanently'
+assert_detected '2026-06-27 22:46:41 ERROR    enhanced_processing.mcp.asgi: Qdrant pages indexes ensured: created=[] existed=[] errors=["connection refused"]'
+assert_detected '[app][ERROR] failed to fetch INFO record'
+assert_detected '{"level":"error","message":"failed to fetch INFO record"}'
 
 (
     WATCHER_EXTRA_EXCLUDE_PATTERN='temporary upstream retry'
