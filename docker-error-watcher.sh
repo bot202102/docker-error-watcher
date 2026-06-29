@@ -62,8 +62,20 @@ get_repo() {
 # ─── Error pattern matching ───
 ERROR_PATTERN='"level":"error"|ERROR|\[ERROR\]|FATAL|PANIC|Unhandled|uncaughtException|unhandledRejection'
 
-# False positives to exclude (pipe-separated, case-insensitive)
-EXCLUDE_PATTERN='pg_isready|redis-cli|redo done|checkpoint starting|checkpoint complete|PermissionError|ECONNREFUSED.*healthcheck'
+# False positives to exclude (pipe-separated, case-insensitive).
+# WATCHER_EXTRA_EXCLUDE_PATTERN lets operators suppress newly classified
+# benign noise without editing the script.
+BASE_EXCLUDE_PATTERN='pg_isready|redis-cli|redo done|checkpoint starting|checkpoint complete|PermissionError|ECONNREFUSED.*healthcheck|Redis broker listen interrupted; retrying'
+if [ -n "${WATCHER_EXTRA_EXCLUDE_PATTERN:-}" ]; then
+    EXCLUDE_PATTERN="${BASE_EXCLUDE_PATTERN}|${WATCHER_EXTRA_EXCLUDE_PATTERN}"
+else
+    EXCLUDE_PATTERN="$BASE_EXCLUDE_PATTERN"
+fi
+
+# Test hook: load configuration/patterns without scanning Docker logs.
+if [ "${WATCHER_TEST_LOAD_ONLY:-0}" = "1" ]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 # ─── Main loop ───
 CONTAINERS=$(docker ps --format '{{.Names}}' 2>/dev/null)
