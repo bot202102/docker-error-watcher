@@ -74,6 +74,7 @@ All settings via environment variables:
 | `WATCHER_LOG_WINDOW` | `5m` | How far back to scan logs |
 | `WATCHER_DEFAULT_REPO` | (empty) | Fallback repo for unknown containers |
 | `WATCHER_CONFIG` | `~/.docker-watcher/repos.conf` | Path to repo mapping file |
+| `WATCHER_EXTRA_EXCLUDE_PATTERN` | (empty) | Extra pipe-separated regex fragments appended to the built-in false-positive filter |
 | `WATCHER_METRICS_FILE` | `~/.docker-watcher/metrics.jsonl` | JSONL log of per-run aggregates |
 | `WATCHER_METRICS_RETENTION_DAYS` | `30` | Rotate metrics file after N days |
 | `WATCHER_RATE_THRESHOLD` | `0` (off) | If >0, open a rate-spike Issue when one (container, route) hits ≥N errors in `WATCHER_LOG_WINDOW` |
@@ -164,6 +165,17 @@ Stack trace: ...
 - Permission errors (usually auth-level, not crashes)
 
 Customize patterns in the script: `ERROR_PATTERN` and `EXCLUDE_PATTERN`.
+
+For host-specific benign noise, prefer an environment override instead of
+editing the script:
+
+```bash
+WATCHER_EXTRA_EXCLUDE_PATTERN='known benign message|another harmless retry'
+```
+
+Built-in false positives include resilient Redis broker retry lines such as
+`Redis broker listen interrupted; retrying`, which indicate the worker retry
+path rather than a product crash.
 
 ## License
 
